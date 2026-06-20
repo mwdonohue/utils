@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/jenkins-jobs.schema.json",
+  "title": "Jenkins Jobs Index Export",
+  "description": "Output contract for index_jenkins_jobs.py. By default, each controller output file is a flat array of Jenkins job records. Each record contains only the fields requested from the Jenkins Remote Access API: name, fullName, fullDisplayName, url, and _class. The optional nested Jenkins response shape produced by --nested is defined under $defs/nestedExport.",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/job"
+  },
+  "$defs": {
+    "job": {
+      "$ref": "#/$defs/jobFields"
+    },
+    "nestedExport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobs"
+      ],
+      "properties": {
+        "jobs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nestedJob"
+          }
+        }
+      }
+    },
+    "nestedJob": {
+      "$ref": "#/$defs/jobFieldsWithChildren"
+    },
+    "jobFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "fullName",
+        "fullDisplayName",
+        "url",
+        "_class"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Job name relative to its parent folder."
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Full Jenkins job name, including folder path segments."
+        },
+        "fullDisplayName": {
+          "type": "string",
+          "description": "Human-readable full Jenkins display name."
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Absolute Jenkins URL for the job."
+        },
+        "_class": {
+          "type": "string",
+          "description": "Jenkins model class for the job or folder."
+        }
+      }
+    },
+    "jobFieldsWithChildren": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "fullName",
+        "fullDisplayName",
+        "url",
+        "_class"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Job name relative to its parent folder."
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Full Jenkins job name, including folder path segments."
+        },
+        "fullDisplayName": {
+          "type": "string",
+          "description": "Human-readable full Jenkins display name."
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Absolute Jenkins URL for the job."
+        },
+        "_class": {
+          "type": "string",
+          "description": "Jenkins model class for the job or folder."
+        },
+        "jobs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nestedJob"
+          },
+          "description": "Child jobs returned for folder-like Jenkins items when max depth includes them."
+        }
+      }
+    }
+  }
+}

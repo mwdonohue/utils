@@ -18,6 +18,7 @@ portion of the ``tree`` query according to ``--max-depth``. A max depth of 1
 returns only top-level jobs; 2 includes one nested ``jobs`` level, and so on.
 By default, the nested Jenkins response is flattened into an array of job
 records. Use ``--nested`` to write the raw Jenkins ``{"jobs": [...]}`` shape.
+The default flat output is described by ``jenkins-jobs.schema.json``.
 
 Authentication is optional. Jenkins typically uses a username plus API token
 with Basic auth. Credentials are read from CLI args first, then these env vars:
@@ -54,7 +55,7 @@ except ModuleNotFoundError:  # pragma: no cover - friendly message, not logic
         "Install it with:  python -m pip install requests"
     )
 
-JOB_FIELDS = ("name", "fullName", "fullDisplayName", "url", "_class")
+JOB_FIELDS = ("name", "fullName", "fullDisplayName", "url", "_class", "allBuilds[number,url,result,timestamp,actions[parameters[name,value]]]")
 USERNAME_ENV_VARS = ("JENKINS_USER", "JENKINS_USERNAME")
 PASSWORD_ENV_VARS = ("JENKINS_API_TOKEN", "JENKINS_TOKEN", "JENKINS_PASSWORD")
 DEFAULT_TIMEOUT = 30
