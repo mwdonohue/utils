@@ -596,6 +596,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Print the search URL and JSON request body to stderr before fetching.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build and print the request, then exit before truststore conversion "
+        "or the Jira API call.",
+    )
     return parser.parse_args(argv)
 
 
@@ -648,22 +654,36 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     expands = parse_expands(args.expand) if args.expand else DEFAULT_EXPANDS
+    body = request_body(
+        jql,
+        max_results=args.max_results,
+        search_mode=args.search_mode,
+        expand=expands,
+    )
     if args.print_request:
         print(
-            "url="
+            "script="
+            + os.path.abspath(__file__)
+            + "\nurl="
             + search_url(site, args.api_version, args.search_mode)
             + "\nbody="
-            + json.dumps(
-                request_body(
-                    jql,
-                    max_results=args.max_results,
-                    search_mode=args.search_mode,
-                    expand=expands,
-                ),
-                indent=2,
-            ),
+            + json.dumps(body, indent=2),
             file=sys.stderr,
         )
+    if args.dry_run:
+        if not args.print_request:
+            print(
+                json.dumps(
+                    {
+                        "script": os.path.abspath(__file__),
+                        "url": search_url(site, args.api_version, args.search_mode),
+                        "body": body,
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+        return 0
 
     print(f"Fetching Jira issues from {site.base_url}...", file=sys.stderr)
     started = time.perf_counter()
