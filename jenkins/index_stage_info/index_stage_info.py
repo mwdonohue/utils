@@ -34,6 +34,7 @@ Usage
     python index_stage_info.py controller-jobs.json --max-depth 2
     python index_stage_info.py - --max-depth 1 -o ./stage-indexes
     python index_stage_info.py jobs.json --max-depth 2 --workers 16
+    python index_stage_info.py one-controller-jobs.json --controller ci.local --max-depth 2
     JENKINS_USER=me JENKINS_API_TOKEN=xxx python index_stage_info.py jobs.json --max-depth 2
     python index_stage_info.py jobs.json --max-depth 2 --print-tree
 
@@ -295,7 +296,7 @@ def dedupe_preserving_order(values: Iterable[str]) -> list[str]:
     return unique
 
 
-def load_controller_jobs(path: str) -> dict[str, list[str]]:
+def load_controller_jobs(path: str, controller_override: str | None) -> dict[str, list[str]]:
     """Read and normalize the input JSON controller-to-jobs map."""
     try:
         if path == "-":
@@ -308,8 +309,26 @@ def load_controller_jobs(path: str) -> dict[str, list[str]]:
     except json.JSONDecodeError as exc:
         raise SystemExit(f"Input file '{path}' is not valid JSON: {exc}") from exc
 
+    if controller_override:
+        jobs = data.get("jobs") if isinstance(data, dict) and "jobs" in data else data
+        try:
+            names = dedupe_preserving_order(iter_job_names(jobs))
+        except ValueError as exc:
+            raise SystemExit(f"Invalid jobs input for {controller_override!r}: {exc}") from exc
+        return {controller_override: names}
+
+    if isinstance(data, dict) and set(data) == {"jobs"}:
+        raise SystemExit(
+            "Input looks like a single-controller Jenkins jobs export "
+            "({'jobs': [...]}). Pass --controller CONTROLLER_URL, or wrap the "
+            "jobs list as {CONTROLLER_URL: [...]}."
+        )
+
     if not isinstance(data, dict):
-        raise SystemExit("Input JSON must be an object mapping controller URL to jobs.")
+        raise SystemExit(
+            "Input JSON must be an object mapping controller URL to jobs. "
+            "For a single controller's jobs array, pass --controller CONTROLLER_URL."
+        )
 
     normalized: dict[str, list[str]] = {}
     for controller, jobs in data.items():
@@ -518,6 +537,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="JSON file mapping controller URL to job list. Use '-' for stdin.",
     )
     parser.add_argument(
+        "--controller",
+        help="Controller URL to use when INPUT is a single controller job export "
+        "such as {'jobs': [...]} or a bare jobs array.",
+    )
+    parser.add_argument(
         "--max-depth",
         type=int,
         required=True,
@@ -600,7 +624,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.retry_backoff < 0:
         raise SystemExit("--retry-backoff must be 0 or greater.")
 
-    controller_jobs = load_controller_jobs(args.input)
+    controller_jobs = load_controller_jobs(args.input, args.controller)
     if not controller_jobs:
         raise SystemExit("Input JSON did not contain any controllers.")
 
