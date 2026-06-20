@@ -17,6 +17,8 @@ commit enrichment. Optional resources can be included with ``--resource``:
     commits   GET /issues/{issueKey}/commits
     branches  GET /issues/branches?key={issueKey}
     details   GET /issuegitdetails/issue/{issueKey}
+    pullRequest
+              GET /issuegitdetails/issue/{issueKey}/pullRequest
     tags      GET /issuegitdetails/issue/{issueKey}/tag
 
 Authentication is optional. Credentials are read from CLI args first, then
@@ -85,7 +87,23 @@ DEFAULT_RETRIES = 3
 DEFAULT_RETRY_BACKOFF = 0.5
 DEFAULT_TRUSTSTORE_TYPE = "JKS"
 DEFAULT_RESOURCES = ("commits",)
-ALL_RESOURCES = ("commits", "branches", "details", "tags")
+ALL_RESOURCES = ("commits", "branches", "details", "pullRequest", "tags")
+RESOURCE_ALIASES = {
+    "commit": "commits",
+    "commits": "commits",
+    "branch": "branches",
+    "branches": "branches",
+    "detail": "details",
+    "details": "details",
+    "pullRequest": "pullRequest",
+    "pullRequests": "pullRequest",
+    "pullrequest": "pullRequest",
+    "pullrequests": "pullRequest",
+    "pr": "pullRequest",
+    "prs": "pullRequest",
+    "tag": "tags",
+    "tags": "tags",
+}
 ISSUE_ID_SPLIT_RE = re.compile(r"[\s,]+")
 CERTIFICATE_RE = re.compile(
     r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
@@ -226,6 +244,16 @@ def request_for(
             url=git_plugin_url(site, f"/issuegitdetails/issue/{quoted_issue}"),
             params={},
         )
+    if resource == "pullRequest":
+        return ResourceRequest(
+            issue_id=issue_id,
+            resource=resource,
+            url=git_plugin_url(
+                site,
+                f"/issuegitdetails/issue/{quoted_issue}/pullRequest",
+            ),
+            params={},
+        )
     if resource == "tags":
         return ResourceRequest(
             issue_id=issue_id,
@@ -351,13 +379,14 @@ def parse_resources(raw_resources: list[str]) -> tuple[str, ...]:
                     if resource not in values:
                         values.append(resource)
                 continue
-            if item not in ALL_RESOURCES:
+            resource = RESOURCE_ALIASES.get(item)
+            if resource is None:
                 raise SystemExit(
                     f"Unknown resource {item!r}. Choose from: "
                     + ", ".join((*ALL_RESOURCES, "all"))
                 )
-            if item not in values:
-                values.append(item)
+            if resource not in values:
+                values.append(resource)
     return tuple(values) if values else DEFAULT_RESOURCES
 
 
@@ -801,7 +830,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         metavar="NAME",
         help="Git Integration resource to fetch: commits, branches, details, "
-        "tags, or all. Defaults to commits. Repeatable and comma-delimited.",
+        "pullRequest, tags, or all. Defaults to commits. Repeatable and "
+        "comma-delimited.",
     )
     parser.add_argument(
         "--show-files",
