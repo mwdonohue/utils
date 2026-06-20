@@ -27,6 +27,9 @@ environment variables:
     password     : JIRA_API_TOKEN, JIRA_TOKEN, JIRA_PASSWORD,
                    ATLASSIAN_API_TOKEN
     bearer token : JIRA_BEARER_TOKEN
+    truststore   : JIRA_TRUSTSTORE, JIRA_TRUSTSTORE_PATH
+    trust pass   : JIRA_TRUSTSTORE_PASSWORD, TRUSTSTORE_PASSWORD
+    keytool      : KEYTOOL, JAVA_KEYTOOL
 
 Usage
 -----
@@ -43,11 +46,14 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 from urllib.parse import quote, urlsplit, urlunsplit
 
 try:
@@ -70,13 +76,21 @@ PASSWORD_ENV_VARS = (
     "ATLASSIAN_API_TOKEN",
 )
 BEARER_TOKEN_ENV_VARS = ("JIRA_BEARER_TOKEN",)
+TRUSTSTORE_ENV_VARS = ("JIRA_TRUSTSTORE", "JIRA_TRUSTSTORE_PATH")
+TRUSTSTORE_PASSWORD_ENV_VARS = ("JIRA_TRUSTSTORE_PASSWORD", "TRUSTSTORE_PASSWORD")
+KEYTOOL_ENV_VARS = ("KEYTOOL", "JAVA_KEYTOOL")
 DEFAULT_TIMEOUT = 30
 DEFAULT_WORKERS = 8
 DEFAULT_RETRIES = 3
 DEFAULT_RETRY_BACKOFF = 0.5
+DEFAULT_TRUSTSTORE_TYPE = "JKS"
 DEFAULT_RESOURCES = ("commits",)
 ALL_RESOURCES = ("commits", "branches", "details", "tags")
 ISSUE_ID_SPLIT_RE = re.compile(r"[\s,]+")
+CERTIFICATE_RE = re.compile(
+    r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+    re.DOTALL,
+)
 
 
 @dataclass(frozen=True)
@@ -364,6 +378,95 @@ def build_auth(
     return HTTPBasicAuth(username, password) if username and password else None
 
 
+def export_truststore_to_pem(
+    truststore_path: str,
+    truststore_password: str,
+    truststore_type: str,
+    keytool: str,
+) -> str:
+    """Export a Java truststore's certificates into a temporary PEM bundle."""
+    if not os.path.isfile(truststore_path):
+        raise ValueError(f"truststore does not exist or is not a file: {truststore_path}")
+    if not truststore_password:
+        raise ValueError(
+            "a truststore password is required. Use --truststore-password or "
+            "set JIRA_TRUSTSTORE_PASSWORD."
+        )
+
+    cmd = [
+        keytool,
+        "-list",
+        "-rfc",
+        "-keystore",
+        truststore_path,
+        "-storepass",
+        truststore_password,
+        "-storetype",
+        truststore_type,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"cannot find keytool executable {keytool!r}. Install a JDK/JRE or "
+            "pass --keytool PATH."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else "(no stderr)"
+        raise RuntimeError(
+            f"keytool could not read truststore {truststore_path!r}: {stderr}"
+        ) from exc
+
+    certs = CERTIFICATE_RE.findall(result.stdout)
+    if not certs:
+        raise RuntimeError(
+            f"keytool read {truststore_path!r}, but did not output any PEM certificates."
+        )
+
+    fd, pem_path = tempfile.mkstemp(prefix="jira-truststore-", suffix=".pem")
+    try:
+        with os.fdopen(fd, "w", encoding="ascii", newline="\n") as fh:
+            fh.write("\n".join(certs))
+            fh.write("\n")
+    except Exception:
+        os.unlink(pem_path)
+        raise
+
+    return pem_path
+
+
+@contextmanager
+def tls_verify_bundle(
+    truststore_path: str | None,
+    truststore_password: str | None,
+    truststore_type: str,
+    keytool: str,
+) -> Iterator[bool | str]:
+    """Yield the requests ``verify`` value, converting JKS/PKCS12 to PEM."""
+    if not truststore_path:
+        yield True
+        return
+
+    pem_path = export_truststore_to_pem(
+        truststore_path=truststore_path,
+        truststore_password=truststore_password or "",
+        truststore_type=truststore_type,
+        keytool=keytool,
+    )
+    try:
+        yield pem_path
+    finally:
+        try:
+            os.unlink(pem_path)
+        except OSError:
+            pass
+
+
 def build_session(
     bearer_token: str | None,
     pool_size: int,
@@ -407,6 +510,7 @@ def fetch_resource(
     request: ResourceRequest,
     auth: HTTPBasicAuth | None,
     timeout: int,
+    verify: bool | str,
 ) -> ResourceResult:
     """Fetch one Git Integration for Jira resource and return its raw JSON."""
     resp = session.get(
@@ -414,6 +518,7 @@ def fetch_resource(
         params=request.params,
         auth=auth,
         timeout=timeout,
+        verify=verify,
         allow_redirects=False,
     )
 
@@ -503,6 +608,7 @@ def fetch_all_resources(
     auth: HTTPBasicAuth | None,
     bearer_token: str | None,
     timeout: int,
+    verify: bool | str,
     workers: int,
     retries: int,
     retry_backoff: float,
@@ -528,7 +634,14 @@ def fetch_all_resources(
     try:
         with ThreadPoolExecutor(max_workers=pool_size) as pool:
             future_to_request = {
-                pool.submit(fetch_resource, session, request, auth, timeout): request
+                pool.submit(
+                    fetch_resource,
+                    session,
+                    request,
+                    auth,
+                    timeout,
+                    verify,
+                ): request
                 for request in requests_to_make
             }
             for future in as_completed(future_to_request):
@@ -661,6 +774,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "combined with Basic auth.",
     )
     parser.add_argument(
+        "--truststore",
+        help="JKS/PKCS12 truststore path for Jira TLS verification. Falls back "
+        "to $JIRA_TRUSTSTORE, then $JIRA_TRUSTSTORE_PATH.",
+    )
+    parser.add_argument(
+        "--truststore-password",
+        help="Truststore password. Falls back to $JIRA_TRUSTSTORE_PASSWORD, "
+        "then $TRUSTSTORE_PASSWORD.",
+    )
+    parser.add_argument(
+        "--truststore-type",
+        type=str.upper,
+        default=DEFAULT_TRUSTSTORE_TYPE,
+        choices=("JKS", "PKCS12"),
+        help=f"Java truststore type (default: {DEFAULT_TRUSTSTORE_TYPE}).",
+    )
+    parser.add_argument(
+        "--keytool",
+        help="Path to keytool for truststore-to-PEM export. Falls back to "
+        "$KEYTOOL, $JAVA_KEYTOOL, then 'keytool' on PATH.",
+    )
+    parser.add_argument(
         "--resource",
         action="append",
         default=[],
@@ -743,6 +878,12 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
+    truststore_path = args.truststore or _first_env(TRUSTSTORE_ENV_VARS)
+    truststore_password = (
+        args.truststore_password or _first_env(TRUSTSTORE_PASSWORD_ENV_VARS)
+    )
+    keytool = args.keytool or _first_env(KEYTOOL_ENV_VARS) or "keytool"
+
     if args.dry_run:
         requests_to_make = [
             request_for(site, issue_id, resource, show_files=args.show_files)
@@ -756,6 +897,12 @@ def main(argv: list[str] | None = None) -> int:
                 "gitPluginApi": git_plugin_base_url(site),
                 "resources": list(resources),
                 "issueIds": issue_ids,
+                "tls": {
+                    "verify": True,
+                    "truststore": truststore_path,
+                    "truststoreType": args.truststore_type,
+                    "keytool": keytool,
+                },
                 "requests": [
                     {
                         "issueId": request.issue_id,
@@ -773,6 +920,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if auth is None and not bearer_token:
         print("No Jira credentials provided.", file=sys.stderr)
+    if truststore_path:
+        print(
+            f"Using {args.truststore_type} truststore for TLS verification: "
+            f"{truststore_path}",
+            file=sys.stderr,
+        )
 
     print(
         f"Fetching {len(resources)} Git Integration resource(s) for "
@@ -780,18 +933,29 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
     started = time.perf_counter()
-    results, errors = fetch_all_resources(
-        site=site,
-        issue_ids=issue_ids,
-        resources=resources,
-        show_files=args.show_files,
-        auth=auth,
-        bearer_token=bearer_token,
-        timeout=args.timeout,
-        workers=args.workers,
-        retries=args.retries,
-        retry_backoff=args.retry_backoff,
-    )
+    try:
+        with tls_verify_bundle(
+            truststore_path=truststore_path,
+            truststore_password=truststore_password,
+            truststore_type=args.truststore_type,
+            keytool=keytool,
+        ) as verify:
+            results, errors = fetch_all_resources(
+                site=site,
+                issue_ids=issue_ids,
+                resources=resources,
+                show_files=args.show_files,
+                auth=auth,
+                bearer_token=bearer_token,
+                timeout=args.timeout,
+                verify=verify,
+                workers=args.workers,
+                retries=args.retries,
+                retry_backoff=args.retry_backoff,
+            )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return 1
     elapsed = time.perf_counter() - started
 
     output = build_output(
