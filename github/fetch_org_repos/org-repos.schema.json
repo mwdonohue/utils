@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/org-repos.schema.json",
+  "title": "GitHub Organization Repositories Export",
+  "description": "Output contract for fetch_org_repos.py. The file is a JSON array of repository metadata objects exactly as returned by GET /orgs/{org}/repos (concatenated across pages). An organization with no repositories produces an empty array []. Unknown properties are allowed everywhere (additionalProperties: true) because GitHub adds response fields over time; consumers should ignore fields they do not recognize. Required properties capture the stable, long-standing core that callers may rely on.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/repository" },
+
+  "$defs": {
+    "repository": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id", "node_id", "name", "full_name", "private", "owner",
+        "html_url", "url", "description", "fork",
+        "created_at", "updated_at", "pushed_at",
+        "homepage", "size", "language", "license", "topics",
+        "forks_count", "stargazers_count", "watchers_count",
+        "open_issues_count", "default_branch", "visibility",
+        "archived", "disabled"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "Unique numeric repository id (int64)."
+        },
+        "node_id": { "type": "string", "description": "GraphQL global node id." },
+        "name": { "type": "string", "description": "Repo name without owner." },
+        "full_name": {
+          "type": "string",
+          "description": "owner/name, e.g. 'anthropics/anthropic-sdk-python'."
+        },
+        "private": { "type": "boolean" },
+        "owner": { "$ref": "#/$defs/simpleUser" },
+        "html_url": { "type": "string", "format": "uri" },
+        "description": {
+          "type": ["string", "null"],
+          "description": "Null when the repo has no description."
+        },
+        "fork": { "type": "boolean" },
+        "url": { "type": "string", "description": "API URL for this repo." },
+
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "pushed_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Null for repositories that have never received a push."
+        },
+
+        "homepage": { "type": ["string", "null"] },
+        "language": {
+          "type": ["string", "null"],
+          "description": "Primary language; null when undetermined."
+        },
+        "mirror_url": {
+          "type": ["string", "null"],
+          "description": "Source URL for mirrored repos; null otherwise."
+        },
+        "license": {
+          "description": "License object, or null when no recognized license.",
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/license" }]
+        },
+
+        "size": { "type": "integer", "description": "Disk size in KB." },
+        "stargazers_count": { "type": "integer" },
+        "watchers_count": { "type": "integer" },
+        "watchers": { "type": "integer", "description": "Alias of watchers_count." },
+        "forks_count": { "type": "integer" },
+        "forks": { "type": "integer", "description": "Alias of forks_count." },
+        "open_issues_count": { "type": "integer" },
+        "open_issues": { "type": "integer", "description": "Alias of open_issues_count." },
+
+        "default_branch": { "type": "string" },
+        "visibility": {
+          "type": "string",
+          "description": "Typically 'public', 'private', or 'internal'."
+        },
+        "archived": { "type": "boolean" },
+        "disabled": { "type": "boolean" },
+        "is_template": { "type": "boolean" },
+        "allow_forking": { "type": "boolean" },
+        "web_commit_signoff_required": { "type": "boolean" },
+
+        "has_issues": { "type": "boolean" },
+        "has_projects": { "type": "boolean" },
+        "has_downloads": { "type": "boolean" },
+        "has_wiki": { "type": "boolean" },
+        "has_pages": { "type": "boolean" },
+        "has_discussions": { "type": "boolean" },
+        "has_pull_requests": { "type": "boolean" },
+
+        "topics": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "custom_properties": {
+          "type": "object",
+          "description": "Org-defined custom properties; arbitrary key/value map.",
+          "additionalProperties": true
+        },
+        "permissions": { "$ref": "#/$defs/permissions" },
+        "pull_request_creation_policy": {
+          "type": "string",
+          "description": "Org policy controlling who may open PRs."
+        },
+
+        "git_url": { "type": "string", "description": "git:// clone URL." },
+        "ssh_url": { "type": "string", "description": "SSH clone URL." },
+        "clone_url": { "type": "string", "format": "uri", "description": "HTTPS clone URL." },
+        "svn_url": { "type": "string", "format": "uri" },
+
+        "forks_url": { "type": "string" },
+        "keys_url": { "type": "string" },
+        "collaborators_url": { "type": "string" },
+        "teams_url": { "type": "string" },
+        "hooks_url": { "type": "string" },
+        "issue_events_url": { "type": "string" },
+        "events_url": { "type": "string" },
+        "assignees_url": { "type": "string" },
+        "branches_url": { "type": "string" },
+        "tags_url": { "type": "string" },
+        "blobs_url": { "type": "string" },
+        "git_tags_url": { "type": "string" },
+        "git_refs_url": { "type": "string" },
+        "trees_url": { "type": "string" },
+        "statuses_url": { "type": "string" },
+        "languages_url": { "type": "string" },
+        "stargazers_url": { "type": "string" },
+        "contributors_url": { "type": "string" },
+        "subscribers_url": { "type": "string" },
+        "subscription_url": { "type": "string" },
+        "commits_url": { "type": "string" },
+        "git_commits_url": { "type": "string" },
+        "comments_url": { "type": "string" },
+        "issue_comment_url": { "type": "string" },
+        "contents_url": { "type": "string" },
+        "compare_url": { "type": "string" },
+        "merges_url": { "type": "string" },
+        "archive_url": { "type": "string" },
+        "downloads_url": { "type": "string" },
+        "issues_url": { "type": "string" },
+        "pulls_url": { "type": "string" },
+        "milestones_url": { "type": "string" },
+        "notifications_url": { "type": "string" },
+        "labels_url": { "type": "string" },
+        "releases_url": { "type": "string" },
+        "deployments_url": { "type": "string" }
+      }
+    },
+
+    "simpleUser": {
+      "type": "object",
+      "description": "Account that owns the repo (user or organization).",
+      "additionalProperties": true,
+      "required": ["login", "id", "node_id", "type", "url", "html_url", "site_admin"],
+      "properties": {
+        "login": { "type": "string" },
+        "id": { "type": "integer" },
+        "node_id": { "type": "string" },
+        "avatar_url": { "type": "string", "format": "uri" },
+        "gravatar_id": { "type": ["string", "null"] },
+        "url": { "type": "string" },
+        "html_url": { "type": "string", "format": "uri" },
+        "followers_url": { "type": "string" },
+        "following_url": { "type": "string" },
+        "gists_url": { "type": "string" },
+        "starred_url": { "type": "string" },
+        "subscriptions_url": { "type": "string" },
+        "organizations_url": { "type": "string" },
+        "repos_url": { "type": "string" },
+        "events_url": { "type": "string" },
+        "received_events_url": { "type": "string" },
+        "type": {
+          "type": "string",
+          "description": "'User' or 'Organization'."
+        },
+        "site_admin": { "type": "boolean" },
+        "user_view_type": { "type": "string" }
+      }
+    },
+
+    "license": {
+      "type": "object",
+      "description": "Recognized license metadata.",
+      "additionalProperties": true,
+      "required": ["key", "name", "spdx_id", "node_id", "url"],
+      "properties": {
+        "key": { "type": "string", "description": "e.g. 'mit', 'apache-2.0'." },
+        "name": { "type": "string", "description": "e.g. 'MIT License'." },
+        "spdx_id": {
+          "type": ["string", "null"],
+          "description": "SPDX identifier, or null / 'NOASSERTION'."
+        },
+        "node_id": { "type": "string" },
+        "url": {
+          "type": ["string", "null"],
+          "description": "API URL for the license; null for some licenses."
+        }
+      }
+    },
+
+    "permissions": {
+      "type": "object",
+      "description": "The requesting token's access level for this repo.",
+      "additionalProperties": true,
+      "required": ["pull", "push", "admin"],
+      "properties": {
+        "admin": { "type": "boolean" },
+        "maintain": { "type": "boolean" },
+        "push": { "type": "boolean" },
+        "triage": { "type": "boolean" },
+        "pull": { "type": "boolean" }
+      }
+    }
+  }
+}
