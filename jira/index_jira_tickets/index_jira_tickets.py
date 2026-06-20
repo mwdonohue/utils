@@ -225,7 +225,6 @@ def request_body(
         "jql": jql,
         "maxResults": max_results,
         "fields": ["*all"],
-        "fieldsByKeys": False,
     }
     if search_mode == "classic":
         body["startAt"] = 0
