@@ -228,7 +228,7 @@ def request_body(
     }
     if search_mode == "classic":
         body["startAt"] = 0
-        body["validateQuery"] = "strict"
+        body["validateQuery"] = True
         body["expand"] = list(expand)
     else:
         body["expand"] = ",".join(expand)
