@@ -21,12 +21,16 @@ which calls:
 
     POST {jira}/rest/api/3/search/jql
 
-The request asks Jira for every field available through search (``fields=*all``)
-and common expansions (names, schema, operations, editmeta, changelog,
-versionedRepresentations, transitions, renderedFields). Some Jira fields, such
-as comments, worklogs, and changelog entries, can still be internally paged by
-Jira inside the issue payload. This script preserves the one-call contract and
-writes whatever Jira returns in that one response.
+By default, the request asks Jira for every field available through search
+(``fields=*all``) and common expansions (names, schema, operations, editmeta,
+changelog, versionedRepresentations, transitions, renderedFields). Some Jira
+fields, such as comments, worklogs, and changelog entries, can still be
+internally paged by Jira inside the issue payload. This script preserves the
+one-call contract and writes whatever Jira returns in that one response.
+
+If Jira or a gateway times out on that large one-call payload, keep the
+one-call contract but shrink the response with ``--max-results``,
+``--no-expand``, or ``--fields key,summary,status,fixVersions``.
 
 Authentication is optional. Jira Cloud typically uses an email address plus API
 token with Basic auth. Credentials are read from CLI args first, then env vars:
@@ -94,6 +98,7 @@ DEFAULT_OUTPUT_DIR = "."
 DEFAULT_SEARCH_MODE = "classic"
 DEFAULT_TRUSTSTORE_TYPE = "JKS"
 DEFAULT_TIMEOUT = 30
+DEFAULT_FIELDS = ("*all",)
 DEFAULT_EXPANDS = (
     "names",
     "schema",
@@ -218,20 +223,23 @@ def request_body(
     *,
     max_results: int,
     search_mode: str,
+    fields: tuple[str, ...],
     expand: tuple[str, ...],
 ) -> dict[str, Any]:
     """Build the search request body for classic or enhanced Jira search."""
     body: dict[str, Any] = {
         "jql": jql,
         "maxResults": max_results,
-        "fields": ["*all"],
+        "fields": list(fields),
     }
     if search_mode == "classic":
         body["startAt"] = 0
         body["validateQuery"] = True
-        body["expand"] = list(expand)
+        if expand:
+            body["expand"] = list(expand)
     else:
-        body["expand"] = ",".join(expand)
+        if expand:
+            body["expand"] = ",".join(expand)
     return body
 
 
@@ -340,6 +348,7 @@ def fetch_issues_once(
     search_mode: str,
     jql: str,
     max_results: int,
+    fields: tuple[str, ...],
     expand: tuple[str, ...],
     auth: HTTPBasicAuth | None,
     timeout: int,
@@ -362,6 +371,7 @@ def fetch_issues_once(
                 jql,
                 max_results=max_results,
                 search_mode=search_mode,
+                fields=fields,
                 expand=expand,
             )
         ),
@@ -390,6 +400,14 @@ def fetch_issues_once(
         raise RuntimeError(
             f"{url} was not found (HTTP 404). Check --api-version and "
             "--search-mode for this Jira site."
+        )
+    if resp.status_code == 504:
+        raise RuntimeError(
+            "Jira or an upstream gateway timed out (HTTP 504). The request is "
+            "probably too large for one response. Because this script is "
+            "constrained to one API call, it will not retry or paginate; try "
+            "lowering --max-results, adding --no-expand, or using --fields "
+            "with only the fields you need."
         )
 
     try:
@@ -474,13 +492,21 @@ def warn_if_truncated(data: dict[str, Any], issue_count: int, search_mode: str) 
 
 
 def parse_expands(raw_expands: list[str]) -> tuple[str, ...]:
-    expands: list[str] = []
-    for raw in raw_expands:
+    return parse_csv_values(raw_expands)
+
+
+def parse_fields(raw_fields: list[str]) -> tuple[str, ...]:
+    return parse_csv_values(raw_fields)
+
+
+def parse_csv_values(raw_values: list[str]) -> tuple[str, ...]:
+    values: list[str] = []
+    for raw in raw_values:
         for item in raw.split(","):
             item = item.strip()
-            if item and item not in expands:
-                expands.append(item)
-    return tuple(expands)
+            if item and item not in values:
+                values.append(item)
+    return tuple(values)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -582,6 +608,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "issue expansions. Repeatable. Passing this replaces the defaults.",
     )
     parser.add_argument(
+        "--no-expand",
+        action="store_true",
+        help="Do not send Jira expand values. Useful when the one-call payload "
+        "is large enough to time out.",
+    )
+    parser.add_argument(
+        "--fields",
+        action="append",
+        default=[],
+        help="Comma-separated Jira fields to request. Defaults to '*all'. "
+        "Repeatable. Example: --fields key,summary,status,fixVersions",
+    )
+    parser.add_argument(
         "--compact",
         action="store_true",
         help="Write minified JSON instead of indented, human-readable JSON.",
@@ -653,11 +692,19 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    expands = parse_expands(args.expand) if args.expand else DEFAULT_EXPANDS
+    fields = parse_fields(args.fields) if args.fields else DEFAULT_FIELDS
+    expands = (
+        ()
+        if args.no_expand
+        else parse_expands(args.expand)
+        if args.expand
+        else DEFAULT_EXPANDS
+    )
     body = request_body(
         jql,
         max_results=args.max_results,
         search_mode=args.search_mode,
+        fields=fields,
         expand=expands,
     )
     if args.print_request:
@@ -700,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
                 search_mode=args.search_mode,
                 jql=jql,
                 max_results=args.max_results,
+                fields=fields,
                 expand=expands,
                 auth=auth,
                 timeout=args.timeout,
