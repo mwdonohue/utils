@@ -31,9 +31,17 @@ writes whatever Jira returns in that one response.
 Authentication is optional. Jira Cloud typically uses an email address plus API
 token with Basic auth. Credentials are read from CLI args first, then env vars:
 
-    base URL : JIRA_BASE_URL, JIRA_URL
-    username : JIRA_USER, JIRA_USERNAME, ATLASSIAN_EMAIL
-    password : JIRA_API_TOKEN, JIRA_TOKEN, JIRA_PASSWORD, ATLASSIAN_API_TOKEN
+    base URL            : JIRA_BASE_URL, JIRA_URL
+    username            : JIRA_USER, JIRA_USERNAME, ATLASSIAN_EMAIL
+    password            : JIRA_API_TOKEN, JIRA_TOKEN, JIRA_PASSWORD,
+                          ATLASSIAN_API_TOKEN
+    JKS truststore path : JIRA_TRUSTSTORE, JIRA_TRUSTSTORE_PATH
+    truststore password : JIRA_TRUSTSTORE_PASSWORD, TRUSTSTORE_PASSWORD
+
+If ``--truststore`` points at a JKS truststore, the script uses ``keytool`` to
+export the trusted certificates into a temporary PEM bundle, passes that bundle
+to ``requests`` as the TLS verifier, and deletes the bundle after the one Jira
+request finishes.
 
 Usage
 -----
@@ -51,10 +59,13 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
 try:
@@ -74,10 +85,14 @@ PASSWORD_ENV_VARS = (
     "JIRA_PASSWORD",
     "ATLASSIAN_API_TOKEN",
 )
+TRUSTSTORE_ENV_VARS = ("JIRA_TRUSTSTORE", "JIRA_TRUSTSTORE_PATH")
+TRUSTSTORE_PASSWORD_ENV_VARS = ("JIRA_TRUSTSTORE_PASSWORD", "TRUSTSTORE_PASSWORD")
+KEYTOOL_ENV_VARS = ("KEYTOOL", "JAVA_KEYTOOL")
 DEFAULT_API_VERSION = 2
 DEFAULT_MAX_RESULTS = 1000
 DEFAULT_OUTPUT_DIR = "."
 DEFAULT_SEARCH_MODE = "classic"
+DEFAULT_TRUSTSTORE_TYPE = "JKS"
 DEFAULT_TIMEOUT = 30
 DEFAULT_EXPANDS = (
     "names",
@@ -90,6 +105,10 @@ DEFAULT_EXPANDS = (
     "renderedFields",
 )
 PROJECT_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+CERTIFICATE_RE = re.compile(
+    r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+    re.DOTALL,
+)
 
 
 @dataclass(frozen=True)
@@ -226,6 +245,95 @@ def build_auth(username: str | None, password: str | None) -> HTTPBasicAuth | No
     return HTTPBasicAuth(username, password) if username and password else None
 
 
+def export_truststore_to_pem(
+    truststore_path: str,
+    truststore_password: str,
+    truststore_type: str,
+    keytool: str,
+) -> str:
+    """Export a Java truststore's certs into a temporary PEM bundle."""
+    if not os.path.isfile(truststore_path):
+        raise ValueError(f"truststore does not exist or is not a file: {truststore_path}")
+    if not truststore_password:
+        raise ValueError(
+            "a truststore password is required. Use --truststore-password or "
+            "set JIRA_TRUSTSTORE_PASSWORD."
+        )
+
+    cmd = [
+        keytool,
+        "-list",
+        "-rfc",
+        "-keystore",
+        truststore_path,
+        "-storepass",
+        truststore_password,
+        "-storetype",
+        truststore_type,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"cannot find keytool executable {keytool!r}. Install a JDK/JRE or "
+            "pass --keytool PATH."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else "(no stderr)"
+        raise RuntimeError(
+            f"keytool could not read truststore {truststore_path!r}: {stderr}"
+        ) from exc
+
+    certs = CERTIFICATE_RE.findall(result.stdout)
+    if not certs:
+        raise RuntimeError(
+            f"keytool read {truststore_path!r}, but did not output any PEM certificates."
+        )
+
+    fd, pem_path = tempfile.mkstemp(prefix="jira-truststore-", suffix=".pem")
+    try:
+        with os.fdopen(fd, "w", encoding="ascii", newline="\n") as fh:
+            fh.write("\n".join(certs))
+            fh.write("\n")
+    except Exception:
+        os.unlink(pem_path)
+        raise
+
+    return pem_path
+
+
+@contextmanager
+def tls_verify_bundle(
+    truststore_path: str | None,
+    truststore_password: str | None,
+    truststore_type: str,
+    keytool: str,
+) -> Iterator[bool | str]:
+    """Yield the requests ``verify`` value, converting JKS to PEM if needed."""
+    if not truststore_path:
+        yield True
+        return
+
+    pem_path = export_truststore_to_pem(
+        truststore_path=truststore_path,
+        truststore_password=truststore_password or "",
+        truststore_type=truststore_type,
+        keytool=keytool,
+    )
+    try:
+        yield pem_path
+    finally:
+        try:
+            os.unlink(pem_path)
+        except OSError:
+            pass
+
+
 def fetch_issues_once(
     site: JiraSite,
     *,
@@ -236,6 +344,7 @@ def fetch_issues_once(
     expand: tuple[str, ...],
     auth: HTTPBasicAuth | None,
     timeout: int,
+    verify: bool | str,
 ) -> dict[str, Any]:
     """Fetch tickets with exactly one Jira API request."""
     session = requests.Session()
@@ -259,6 +368,7 @@ def fetch_issues_once(
         ),
         auth=auth,
         timeout=timeout,
+        verify=verify,
         allow_redirects=False,
     )
 
@@ -444,6 +554,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"HTTP timeout in seconds for the one request (default: {DEFAULT_TIMEOUT}).",
     )
     parser.add_argument(
+        "--truststore",
+        help="JKS truststore path for Jira TLS verification. Falls back to "
+        "$JIRA_TRUSTSTORE, then $JIRA_TRUSTSTORE_PATH.",
+    )
+    parser.add_argument(
+        "--truststore-password",
+        help="Truststore password. Falls back to $JIRA_TRUSTSTORE_PASSWORD, "
+        "then $TRUSTSTORE_PASSWORD.",
+    )
+    parser.add_argument(
+        "--truststore-type",
+        type=str.upper,
+        default=DEFAULT_TRUSTSTORE_TYPE,
+        choices=("JKS", "PKCS12"),
+        help=f"Java truststore type (default: {DEFAULT_TRUSTSTORE_TYPE}).",
+    )
+    parser.add_argument(
+        "--keytool",
+        help="Path to keytool for JKS-to-PEM export. Falls back to $KEYTOOL, "
+        "$JAVA_KEYTOOL, then 'keytool' on PATH.",
+    )
+    parser.add_argument(
         "--expand",
         action="append",
         default=[],
@@ -499,10 +631,22 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
+    truststore_path = args.truststore or _first_env(TRUSTSTORE_ENV_VARS)
+    truststore_password = (
+        args.truststore_password or _first_env(TRUSTSTORE_PASSWORD_ENV_VARS)
+    )
+    keytool = args.keytool or _first_env(KEYTOOL_ENV_VARS) or "keytool"
+
     if args.print_jql:
         print(f"jql={jql}", file=sys.stderr)
     if auth is None:
         print("No Basic auth credentials provided.", file=sys.stderr)
+    if truststore_path:
+        print(
+            f"Using {args.truststore_type} truststore for TLS verification: "
+            f"{truststore_path}",
+            file=sys.stderr,
+        )
 
     expands = parse_expands(args.expand) if args.expand else DEFAULT_EXPANDS
     if args.print_request:
@@ -525,16 +669,23 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Fetching Jira issues from {site.base_url}...", file=sys.stderr)
     started = time.perf_counter()
     try:
-        data = fetch_issues_once(
-            site,
-            api_version=args.api_version,
-            search_mode=args.search_mode,
-            jql=jql,
-            max_results=args.max_results,
-            expand=expands,
-            auth=auth,
-            timeout=args.timeout,
-        )
+        with tls_verify_bundle(
+            truststore_path=truststore_path,
+            truststore_password=truststore_password,
+            truststore_type=args.truststore_type,
+            keytool=keytool,
+        ) as verify:
+            data = fetch_issues_once(
+                site,
+                api_version=args.api_version,
+                search_mode=args.search_mode,
+                jql=jql,
+                max_results=args.max_results,
+                expand=expands,
+                auth=auth,
+                timeout=args.timeout,
+                verify=verify,
+            )
         issues = data["issues"]
         written = write_issue_files(args.output_dir, issues, compact=args.compact)
     except (OSError, requests.RequestException, RuntimeError) as exc:
