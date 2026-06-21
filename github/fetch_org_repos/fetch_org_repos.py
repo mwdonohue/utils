@@ -41,6 +41,13 @@ Authentication is optional but strongly recommended:
 
 The token is read (in order) from --token, $GITHUB_TOKEN, then $GH_TOKEN.
 
+If GitHub Enterprise or a proxy uses an internal CA, a Java truststore can be
+supplied for TLS verification:
+
+    truststore path     : GITHUB_TRUSTSTORE, GITHUB_TRUSTSTORE_PATH
+    truststore password : GITHUB_TRUSTSTORE_PASSWORD, TRUSTSTORE_PASSWORD
+    keytool             : KEYTOOL, JAVA_KEYTOOL
+
 Usage
 -----
     python fetch_org_repos.py ORG_NAME
@@ -54,10 +61,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import parse_qs, urlparse
 
 try:
@@ -75,6 +86,107 @@ API_ROOT = "https://api.github.com"
 ENDPOINT_TEMPLATE = API_ROOT + "/orgs/{org}/repos"
 MAX_PER_PAGE = 100  # GitHub's hard cap for this endpoint.
 DEFAULT_WORKERS = 8
+TRUSTSTORE_ENV_VARS = ("GITHUB_TRUSTSTORE", "GITHUB_TRUSTSTORE_PATH")
+TRUSTSTORE_PASSWORD_ENV_VARS = ("GITHUB_TRUSTSTORE_PASSWORD", "TRUSTSTORE_PASSWORD")
+KEYTOOL_ENV_VARS = ("KEYTOOL", "JAVA_KEYTOOL")
+DEFAULT_TRUSTSTORE_TYPE = "JKS"
+CERTIFICATE_RE = re.compile(
+    r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+    re.DOTALL,
+)
+
+
+def _first_env(names: tuple[str, ...]) -> str | None:
+    return next((os.environ[name] for name in names if os.environ.get(name)), None)
+
+
+def export_truststore_to_pem(
+    truststore_path: str,
+    truststore_password: str,
+    truststore_type: str,
+    keytool: str,
+) -> str:
+    """Export a Java truststore's certificates into a temporary PEM bundle."""
+    if not os.path.isfile(truststore_path):
+        raise ValueError(f"truststore does not exist or is not a file: {truststore_path}")
+    if not truststore_password:
+        raise ValueError(
+            "a truststore password is required. Use --truststore-password or "
+            "set GITHUB_TRUSTSTORE_PASSWORD."
+        )
+
+    cmd = [
+        keytool,
+        "-list",
+        "-rfc",
+        "-keystore",
+        truststore_path,
+        "-storepass",
+        truststore_password,
+        "-storetype",
+        truststore_type,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"cannot find keytool executable {keytool!r}. Install a JDK/JRE or "
+            "pass --keytool PATH."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else "(no stderr)"
+        raise RuntimeError(
+            f"keytool could not read truststore {truststore_path!r}: {stderr}"
+        ) from exc
+
+    certs = CERTIFICATE_RE.findall(result.stdout)
+    if not certs:
+        raise RuntimeError(
+            f"keytool read {truststore_path!r}, but did not output any PEM certificates."
+        )
+
+    fd, pem_path = tempfile.mkstemp(prefix="github-truststore-", suffix=".pem")
+    try:
+        with os.fdopen(fd, "w", encoding="ascii", newline="\n") as fh:
+            fh.write("\n".join(certs))
+            fh.write("\n")
+    except Exception:
+        os.unlink(pem_path)
+        raise
+
+    return pem_path
+
+
+@contextmanager
+def tls_verify_bundle(
+    truststore_path: str | None,
+    truststore_password: str | None,
+    truststore_type: str,
+    keytool: str,
+) -> Iterator[bool | str]:
+    """Yield the requests ``verify`` value, converting JKS/PKCS12 to PEM."""
+    if not truststore_path:
+        yield True
+        return
+
+    pem_path = export_truststore_to_pem(
+        truststore_path=truststore_path,
+        truststore_password=truststore_password or "",
+        truststore_type=truststore_type,
+        keytool=keytool,
+    )
+    try:
+        yield pem_path
+    finally:
+        try:
+            os.unlink(pem_path)
+        except OSError:
+            pass
 
 
 def build_session(token: str | None, pool_size: int) -> requests.Session:
@@ -148,11 +260,12 @@ def _get(
     params: dict[str, Any] | None,
     org: str,
     max_rate_limit_waits: int,
+    verify: bool | str,
 ) -> requests.Response:
     """GET a URL, transparently waiting out rate limits, then validate status."""
     waits = 0
     while True:
-        resp = session.get(url, params=params, timeout=30)
+        resp = session.get(url, params=params, timeout=30, verify=verify)
         sleep_for = _sleep_for_rate_limit(resp)
         if sleep_for is not None and waits < max_rate_limit_waits:
             print(
@@ -186,6 +299,7 @@ def fetch_all_repos(
     per_page: int = MAX_PER_PAGE,
     workers: int = DEFAULT_WORKERS,
     max_rate_limit_waits: int = 3,
+    verify: bool | str = True,
 ) -> list[dict[str, Any]]:
     """Return metadata for every repo in ``org``, paging concurrently.
 
@@ -204,7 +318,7 @@ def fetch_all_repos(
     }
 
     # First call doubles as discovery: it tells us how many pages exist.
-    first = _get(session, base_url, base_params, org, max_rate_limit_waits)
+    first = _get(session, base_url, base_params, org, max_rate_limit_waits, verify)
     last_page = _last_page_number(first)
     pages: dict[int, list[dict[str, Any]]] = {1: first.json()}
     print(
@@ -216,7 +330,7 @@ def fetch_all_repos(
     if last_page > 1:
         def fetch_page(n: int) -> tuple[int, list[dict[str, Any]]]:
             params = dict(base_params, page=n)
-            resp = _get(session, base_url, params, org, max_rate_limit_waits)
+            resp = _get(session, base_url, params, org, max_rate_limit_waits, verify)
             return n, resp.json()
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -248,6 +362,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--token",
         help="GitHub token. Falls back to $GITHUB_TOKEN, then $GH_TOKEN.",
+    )
+    parser.add_argument(
+        "--truststore",
+        help="JKS/PKCS12 truststore path for GitHub TLS verification. Falls "
+        "back to $GITHUB_TRUSTSTORE, then $GITHUB_TRUSTSTORE_PATH.",
+    )
+    parser.add_argument(
+        "--truststore-password",
+        help="Truststore password. Falls back to $GITHUB_TRUSTSTORE_PASSWORD, "
+        "then $TRUSTSTORE_PASSWORD.",
+    )
+    parser.add_argument(
+        "--truststore-type",
+        type=str.upper,
+        default=DEFAULT_TRUSTSTORE_TYPE,
+        choices=("JKS", "PKCS12"),
+        help=f"Java truststore type (default: {DEFAULT_TRUSTSTORE_TYPE}).",
+    )
+    parser.add_argument(
+        "--keytool",
+        help="Path to keytool for truststore-to-PEM export. Falls back to "
+        "$KEYTOOL, $JAVA_KEYTOOL, then 'keytool' on PATH.",
     )
     parser.add_argument(
         "--type",
@@ -282,22 +418,44 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     token = args.token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     output_path = args.output or f"{args.org}-repos.json"
+    truststore_path = args.truststore or _first_env(TRUSTSTORE_ENV_VARS)
+    truststore_password = (
+        args.truststore_password or _first_env(TRUSTSTORE_PASSWORD_ENV_VARS)
+    )
+    keytool = args.keytool or _first_env(KEYTOOL_ENV_VARS) or "keytool"
 
     if not token:
         print(
             "No token provided -> only public repos, 60 requests/hour limit.",
             file=sys.stderr,
         )
+    if truststore_path:
+        print(
+            f"Using {args.truststore_type} truststore for TLS verification: "
+            f"{truststore_path}",
+            file=sys.stderr,
+        )
 
     print(f"Fetching repos for organization '{args.org}'...", file=sys.stderr)
     started = time.perf_counter()
-    repos = fetch_all_repos(
-        args.org,
-        token=token,
-        repo_type=args.type,
-        per_page=args.per_page,
-        workers=args.workers,
-    )
+    try:
+        with tls_verify_bundle(
+            truststore_path=truststore_path,
+            truststore_password=truststore_password,
+            truststore_type=args.truststore_type,
+            keytool=keytool,
+        ) as verify:
+            repos = fetch_all_repos(
+                args.org,
+                token=token,
+                repo_type=args.type,
+                per_page=args.per_page,
+                workers=args.workers,
+                verify=verify,
+            )
+    except (OSError, requests.RequestException, RuntimeError, ValueError) as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return 1
     elapsed = time.perf_counter() - started
 
     with open(output_path, "w", encoding="utf-8") as fh:

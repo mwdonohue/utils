@@ -1,0 +1,332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/stage-info.schema.json",
+  "title": "Jenkins Pipeline Stage Info Export",
+  "description": "Output contract for index_stage_info.py. Each controller output file is a JSON array of normalized job entries. Each entry contains the Jenkins full job name, canonical job URL, and raw Pipeline REST API run/stage payloads returned by one wfapi/runs request for that job. The incremental state file shape is defined under $defs/incrementalState.",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/jobStageInfo"
+  },
+  "$defs": {
+    "jobStageInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "url",
+        "runs"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Jenkins full job name."
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Canonical Jenkins job URL."
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pipelineRun"
+          }
+        }
+      }
+    },
+    "pipelineRun": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "name",
+        "status",
+        "startTimeMillis",
+        "stages"
+      ],
+      "properties": {
+        "_links": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "id": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startTimeMillis": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "endTimeMillis": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "durationMillis": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "queueDurationMillis": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pauseDurationMillis": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pipelineStage"
+          }
+        }
+      }
+    },
+    "pipelineStage": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "name",
+        "status",
+        "startTimeMillis"
+      ],
+      "properties": {
+        "_links": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "id": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "execNode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startTimeMillis": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "durationMillis": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pauseDurationMillis": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stageFlowNodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pipelineFlowNode"
+          }
+        }
+      }
+    },
+    "pipelineFlowNode": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "_links": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "id": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startTimeMillis": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "durationMillis": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pauseDurationMillis": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "parentNodes": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "integer"
+            ]
+          }
+        },
+        "error": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          }
+        },
+        "stageFlowNodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pipelineFlowNode"
+          }
+        }
+      }
+    },
+    "incrementalState": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "version",
+        "controllers"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "controllers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/controllerState"
+          }
+        }
+      }
+    },
+    "controllerState": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "lastUpdatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "jobs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/jobIncrementalState"
+          }
+        }
+      }
+    },
+    "jobIncrementalState": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "since": {
+          "type": "string",
+          "description": "Stored wfapi/runs since value for the next incremental request."
+        },
+        "lastFetchedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastFetchRunCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lastRequestedSince": {
+          "type": "string"
+        },
+        "lastSeenStartTimeMillis": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lastSeenEndTimeMillis": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lastSeenBuildId": {
+          "type": "string"
+        },
+        "lastCompletedStartTimeMillis": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lastCompletedEndTimeMillis": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lastCompletedBuildId": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

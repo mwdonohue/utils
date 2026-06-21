@@ -39,6 +39,13 @@ URLs that already embed credentials are left untouched, and the token is
 redacted from all printed output. SSH remotes (``git@host:...``) authenticate
 with your SSH keys; the PAT does not apply to them.
 
+If GitHub Enterprise or a proxy uses an internal CA, a Java truststore can be
+supplied for HTTPS clone TLS verification:
+
+    truststore path     : GITHUB_TRUSTSTORE, GITHUB_TRUSTSTORE_PATH
+    truststore password : GITHUB_TRUSTSTORE_PASSWORD, TRUSTSTORE_PASSWORD
+    keytool             : KEYTOOL, JAVA_KEYTOOL
+
 Usage
 -----
     python mirror_clone_repos.py https://github.com/owner/repo.git
@@ -59,10 +66,13 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from typing import Iterator
 from urllib.parse import urlsplit
 
 DEFAULT_JOBS = 8
@@ -70,6 +80,10 @@ DEFAULT_RETRIES = 2
 DEFAULT_DEST = "mirrors"
 DEFAULT_TOKEN_USERNAME = "x-access-token"
 TOKEN_ENV_VARS = ("GIT_PAT", "GITHUB_TOKEN", "GH_TOKEN")
+TRUSTSTORE_ENV_VARS = ("GITHUB_TRUSTSTORE", "GITHUB_TRUSTSTORE_PATH")
+TRUSTSTORE_PASSWORD_ENV_VARS = ("GITHUB_TRUSTSTORE_PASSWORD", "TRUSTSTORE_PASSWORD")
+KEYTOOL_ENV_VARS = ("KEYTOOL", "JAVA_KEYTOOL")
+DEFAULT_TRUSTSTORE_TYPE = "JKS"
 
 # Keys to pull a clone URL from when the input is JSON (e.g. the output of the
 # sibling fetch_org_repos.py). Order encodes the --prefer choice.
@@ -81,6 +95,103 @@ JSON_URL_KEYS = {
 _print_lock = threading.Lock()
 # Matches the "user[:pass]@" credential portion of any URL, for redaction.
 _CRED_RE = re.compile(r"(\w+://)[^/@\s]+@")
+CERTIFICATE_RE = re.compile(
+    r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+    re.DOTALL,
+)
+
+
+def _first_env(names: tuple[str, ...]) -> str | None:
+    return next((os.environ[name] for name in names if os.environ.get(name)), None)
+
+
+def export_truststore_to_pem(
+    truststore_path: str,
+    truststore_password: str,
+    truststore_type: str,
+    keytool: str,
+) -> str:
+    """Export a Java truststore's certificates into a temporary PEM bundle."""
+    if not os.path.isfile(truststore_path):
+        raise ValueError(f"truststore does not exist or is not a file: {truststore_path}")
+    if not truststore_password:
+        raise ValueError(
+            "a truststore password is required. Use --truststore-password or "
+            "set GITHUB_TRUSTSTORE_PASSWORD."
+        )
+
+    cmd = [
+        keytool,
+        "-list",
+        "-rfc",
+        "-keystore",
+        truststore_path,
+        "-storepass",
+        truststore_password,
+        "-storetype",
+        truststore_type,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"cannot find keytool executable {keytool!r}. Install a JDK/JRE or "
+            "pass --keytool PATH."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else "(no stderr)"
+        raise RuntimeError(
+            f"keytool could not read truststore {truststore_path!r}: {stderr}"
+        ) from exc
+
+    certs = CERTIFICATE_RE.findall(result.stdout)
+    if not certs:
+        raise RuntimeError(
+            f"keytool read {truststore_path!r}, but did not output any PEM certificates."
+        )
+
+    fd, pem_path = tempfile.mkstemp(prefix="github-truststore-", suffix=".pem")
+    try:
+        with os.fdopen(fd, "w", encoding="ascii", newline="\n") as fh:
+            fh.write("\n".join(certs))
+            fh.write("\n")
+    except Exception:
+        os.unlink(pem_path)
+        raise
+
+    return pem_path
+
+
+@contextmanager
+def truststore_ca_file(
+    truststore_path: str | None,
+    truststore_password: str | None,
+    truststore_type: str,
+    keytool: str,
+) -> Iterator[str | None]:
+    """Yield a Git-compatible CA bundle path, converting JKS/PKCS12 to PEM."""
+    if not truststore_path:
+        yield None
+        return
+
+    pem_path = export_truststore_to_pem(
+        truststore_path=truststore_path,
+        truststore_password=truststore_password or "",
+        truststore_type=truststore_type,
+        keytool=keytool,
+    )
+    try:
+        yield pem_path
+    finally:
+        try:
+            os.unlink(pem_path)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -255,10 +366,17 @@ def is_bare_repo(path: str) -> bool:
     )
 
 
-def build_env(repo: RepoUrl, token: str | None, username: str) -> dict[str, str]:
+def build_env(
+    repo: RepoUrl,
+    token: str | None,
+    username: str,
+    ssl_ca_info: str | None,
+) -> dict[str, str]:
     """Environment for the git child: no prompts, plus a scoped PAT header."""
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"  # never hang the batch on an auth prompt
+    if ssl_ca_info:
+        env["GIT_SSL_CAINFO"] = ssl_ca_info
     if token and repo.scheme in ("http", "https") and repo.host:
         creds = base64.b64encode(f"{username}:{token}".encode()).decode()
         header = f"Authorization: Basic {creds}"
@@ -290,7 +408,7 @@ def clone_one(repo: RepoUrl, args: argparse.Namespace, token: str | None) -> Res
     if repo.has_userinfo and token:
         # URL already carries credentials; respect them rather than overriding.
         pass
-    env = build_env(repo, use_token, args.token_username)
+    env = build_env(repo, use_token, args.token_username, args.ssl_ca_info)
 
     already = os.path.isdir(dest) and is_bare_repo(dest)
     if already and not args.force:
@@ -394,6 +512,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         f"(default: '{DEFAULT_TOKEN_USERNAME}'; works for GitHub).",
     )
     parser.add_argument(
+        "--truststore",
+        help="JKS/PKCS12 truststore path for HTTPS clone TLS verification. "
+        "Falls back to $GITHUB_TRUSTSTORE, then $GITHUB_TRUSTSTORE_PATH.",
+    )
+    parser.add_argument(
+        "--truststore-password",
+        help="Truststore password. Falls back to $GITHUB_TRUSTSTORE_PASSWORD, "
+        "then $TRUSTSTORE_PASSWORD.",
+    )
+    parser.add_argument(
+        "--truststore-type",
+        type=str.upper,
+        default=DEFAULT_TRUSTSTORE_TYPE,
+        choices=("JKS", "PKCS12"),
+        help=f"Java truststore type (default: {DEFAULT_TRUSTSTORE_TYPE}).",
+    )
+    parser.add_argument(
+        "--keytool",
+        help="Path to keytool for truststore-to-PEM export. Falls back to "
+        "$KEYTOOL, $JAVA_KEYTOOL, then 'keytool' on PATH.",
+    )
+    parser.add_argument(
         "--prefer", choices=("https", "ssh"), default="https",
         help="Which URL field to pick from JSON input (default: https).",
     )
@@ -421,6 +561,11 @@ def main(argv: list[str] | None = None) -> int:
     token = args.token or next(
         (os.environ[v] for v in TOKEN_ENV_VARS if os.environ.get(v)), None
     )
+    truststore_path = args.truststore or _first_env(TRUSTSTORE_ENV_VARS)
+    truststore_password = (
+        args.truststore_password or _first_env(TRUSTSTORE_PASSWORD_ENV_VARS)
+    )
+    keytool = args.keytool or _first_env(KEYTOOL_ENV_VARS) or "keytool"
 
     urls = load_urls(args)
     if not urls:
@@ -441,17 +586,36 @@ def main(argv: list[str] | None = None) -> int:
     if not token:
         print("No PAT provided -> private https repos will fail; public repos "
               "and SSH remotes are unaffected.", file=sys.stderr)
+    if truststore_path:
+        print(
+            f"Using {args.truststore_type} truststore for HTTPS clone TLS "
+            f"verification: {truststore_path}",
+            file=sys.stderr,
+        )
     print(f"Mirroring {len(repos)} repo(s) into '{os.path.abspath(args.dest)}' "
           f"with {args.jobs} parallel job(s)...", file=sys.stderr)
 
     started = time.perf_counter()
     results: list[Result] = []
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = {pool.submit(clone_one, repo, args, token): repo for repo in repos}
-        for future in as_completed(futures):
-            result = future.result()
-            results.append(result)
-            emit(result)
+    try:
+        with truststore_ca_file(
+            truststore_path=truststore_path,
+            truststore_password=truststore_password,
+            truststore_type=args.truststore_type,
+            keytool=keytool,
+        ) as ssl_ca_info:
+            args.ssl_ca_info = ssl_ca_info
+            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+                futures = {
+                    pool.submit(clone_one, repo, args, token): repo for repo in repos
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    results.append(result)
+                    emit(result)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return 1
     elapsed = time.perf_counter() - started
 
     counts: dict[str, int] = {}

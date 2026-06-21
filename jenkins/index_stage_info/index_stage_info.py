@@ -35,6 +35,9 @@ with Basic auth. Credentials are read from CLI args first, then these env vars:
 
     username: JENKINS_USER, JENKINS_USERNAME
     password: JENKINS_API_TOKEN, JENKINS_TOKEN, JENKINS_PASSWORD
+    truststore path: JENKINS_TRUSTSTORE, JENKINS_TRUSTSTORE_PATH
+    truststore password: JENKINS_TRUSTSTORE_PASSWORD, TRUSTSTORE_PASSWORD
+    keytool: KEYTOOL, JAVA_KEYTOOL
 
 Usage
 -----
@@ -62,13 +65,16 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import BoundedSemaphore
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 try:
@@ -116,6 +122,9 @@ FLOW_NODE_FIELDS = (
 )
 USERNAME_ENV_VARS = ("JENKINS_USER", "JENKINS_USERNAME")
 PASSWORD_ENV_VARS = ("JENKINS_API_TOKEN", "JENKINS_TOKEN", "JENKINS_PASSWORD")
+TRUSTSTORE_ENV_VARS = ("JENKINS_TRUSTSTORE", "JENKINS_TRUSTSTORE_PATH")
+TRUSTSTORE_PASSWORD_ENV_VARS = ("JENKINS_TRUSTSTORE_PASSWORD", "TRUSTSTORE_PASSWORD")
+KEYTOOL_ENV_VARS = ("KEYTOOL", "JAVA_KEYTOOL")
 DEFAULT_TIMEOUT = 30
 DEFAULT_OUTPUT_DIR = "."
 DEFAULT_WORKERS = 8
@@ -123,7 +132,12 @@ DEFAULT_CONTROLLER_WORKERS = 2
 DEFAULT_RETRIES = 3
 DEFAULT_RETRY_BACKOFF = 0.5
 DEFAULT_STATE_FILENAME = ".index-stage-info-state.json"
+DEFAULT_TRUSTSTORE_TYPE = "JKS"
 INCOMPLETE_RUN_STATUSES = {"IN_PROGRESS", "PAUSED_PENDING_INPUT", "QUEUED", "NOT_STARTED"}
+CERTIFICATE_RE = re.compile(
+    r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+    re.DOTALL,
+)
 
 
 @dataclass(frozen=True)
@@ -200,6 +214,95 @@ def build_flow_node_tree(max_depth: int) -> str:
 
 def _first_env(names: tuple[str, ...]) -> str | None:
     return next((os.environ[name] for name in names if os.environ.get(name)), None)
+
+
+def export_truststore_to_pem(
+    truststore_path: str,
+    truststore_password: str,
+    truststore_type: str,
+    keytool: str,
+) -> str:
+    """Export a Java truststore's certificates into a temporary PEM bundle."""
+    if not os.path.isfile(truststore_path):
+        raise ValueError(f"truststore does not exist or is not a file: {truststore_path}")
+    if not truststore_password:
+        raise ValueError(
+            "a truststore password is required. Use --truststore-password or "
+            "set JENKINS_TRUSTSTORE_PASSWORD."
+        )
+
+    cmd = [
+        keytool,
+        "-list",
+        "-rfc",
+        "-keystore",
+        truststore_path,
+        "-storepass",
+        truststore_password,
+        "-storetype",
+        truststore_type,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"cannot find keytool executable {keytool!r}. Install a JDK/JRE or "
+            "pass --keytool PATH."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else "(no stderr)"
+        raise RuntimeError(
+            f"keytool could not read truststore {truststore_path!r}: {stderr}"
+        ) from exc
+
+    certs = CERTIFICATE_RE.findall(result.stdout)
+    if not certs:
+        raise RuntimeError(
+            f"keytool read {truststore_path!r}, but did not output any PEM certificates."
+        )
+
+    fd, pem_path = tempfile.mkstemp(prefix="jenkins-truststore-", suffix=".pem")
+    try:
+        with os.fdopen(fd, "w", encoding="ascii", newline="\n") as fh:
+            fh.write("\n".join(certs))
+            fh.write("\n")
+    except Exception:
+        os.unlink(pem_path)
+        raise
+
+    return pem_path
+
+
+@contextmanager
+def tls_verify_bundle(
+    truststore_path: str | None,
+    truststore_password: str | None,
+    truststore_type: str,
+    keytool: str,
+) -> Iterator[bool | str]:
+    """Yield the requests ``verify`` value, converting JKS/PKCS12 to PEM."""
+    if not truststore_path:
+        yield True
+        return
+
+    pem_path = export_truststore_to_pem(
+        truststore_path=truststore_path,
+        truststore_password=truststore_password or "",
+        truststore_type=truststore_type,
+        keytool=keytool,
+    )
+    try:
+        yield pem_path
+    finally:
+        try:
+            os.unlink(pem_path)
+        except OSError:
+            pass
 
 
 def _safe_filename_stem(parts: Any) -> str:
@@ -633,6 +736,7 @@ def fetch_stage_info(
     timeout: int,
     full_stages: bool,
     since: str | None,
+    verify: bool | str,
     request_semaphore: BoundedSemaphore,
 ) -> list[Any]:
     """Fetch one job's run/stage data with one HTTP request."""
@@ -649,6 +753,7 @@ def fetch_stage_info(
             params=params,
             auth=auth,
             timeout=timeout,
+            verify=verify,
             allow_redirects=False,
         )
     finally:
@@ -698,6 +803,7 @@ def fetch_controller_jobs(
     timeout: int,
     full_stages: bool,
     manual_since: str | None,
+    verify: bool | str,
     workers: int,
     job_states: dict[str, dict[str, Any]],
     request_semaphore: BoundedSemaphore,
@@ -727,6 +833,7 @@ def fetch_controller_jobs(
             timeout=timeout,
             full_stages=full_stages,
             since=effective_since,
+            verify=verify,
             request_semaphore=request_semaphore,
         )
         state_update = (
@@ -798,6 +905,7 @@ def process_controller(
     timeout: int,
     full_stages: bool,
     manual_since: str | None,
+    verify: bool | str,
     workers: int,
     retries: int,
     retry_backoff: float,
@@ -823,6 +931,7 @@ def process_controller(
             timeout=timeout,
             full_stages=full_stages,
             manual_since=manual_since,
+            verify=verify,
             workers=workers,
             job_states=job_states,
             request_semaphore=request_semaphore,
@@ -895,6 +1004,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--password",
         help="Jenkins Basic auth password or API token. Falls back to "
         "$JENKINS_API_TOKEN, $JENKINS_TOKEN, then $JENKINS_PASSWORD.",
+    )
+    parser.add_argument(
+        "--truststore",
+        help="JKS/PKCS12 truststore path for Jenkins TLS verification. Falls "
+        "back to $JENKINS_TRUSTSTORE, then $JENKINS_TRUSTSTORE_PATH.",
+    )
+    parser.add_argument(
+        "--truststore-password",
+        help="Truststore password. Falls back to $JENKINS_TRUSTSTORE_PASSWORD, "
+        "then $TRUSTSTORE_PASSWORD.",
+    )
+    parser.add_argument(
+        "--truststore-type",
+        type=str.upper,
+        default=DEFAULT_TRUSTSTORE_TYPE,
+        choices=("JKS", "PKCS12"),
+        help=f"Java truststore type (default: {DEFAULT_TRUSTSTORE_TYPE}).",
+    )
+    parser.add_argument(
+        "--keytool",
+        help="Path to keytool for truststore-to-PEM export. Falls back to "
+        "$KEYTOOL, $JAVA_KEYTOOL, then 'keytool' on PATH.",
     )
     parser.add_argument(
         "--timeout",
@@ -1002,6 +1133,11 @@ def main(argv: list[str] | None = None) -> int:
 
     username = args.username or _first_env(USERNAME_ENV_VARS)
     password = args.password or _first_env(PASSWORD_ENV_VARS)
+    truststore_path = args.truststore or _first_env(TRUSTSTORE_ENV_VARS)
+    truststore_password = (
+        args.truststore_password or _first_env(TRUSTSTORE_PASSWORD_ENV_VARS)
+    )
+    keytool = args.keytool or _first_env(KEYTOOL_ENV_VARS) or "keytool"
     if bool(username) != bool(password):
         raise SystemExit(
             "Basic auth needs both username and password/token. Provide both "
@@ -1014,6 +1150,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"tree={tree}", file=sys.stderr)
     if auth is None:
         print("No Basic auth credentials provided.", file=sys.stderr)
+    if truststore_path:
+        print(
+            f"Using {args.truststore_type} truststore for TLS verification: "
+            f"{truststore_path}",
+            file=sys.stderr,
+        )
 
     incremental = not args.no_incremental
     state_path = state_path_for(args.output_dir, args.state_file)
@@ -1055,53 +1197,64 @@ def main(argv: list[str] | None = None) -> int:
         controller_specs.append((controller, job_names, path, job_states))
 
     if controller_specs:
-        max_controller_workers = min(args.controller_workers, len(controller_specs))
-        print(
-            f"Processing {len(controller_specs)} controller(s) with "
-            f"{max_controller_workers} controller worker(s), {args.workers} "
-            f"job worker(s) each, and {max_concurrent_requests} max request(s).",
-            file=sys.stderr,
-        )
+        try:
+            with tls_verify_bundle(
+                truststore_path=truststore_path,
+                truststore_password=truststore_password,
+                truststore_type=args.truststore_type,
+                keytool=keytool,
+            ) as verify:
+                max_controller_workers = min(args.controller_workers, len(controller_specs))
+                print(
+                    f"Processing {len(controller_specs)} controller(s) with "
+                    f"{max_controller_workers} controller worker(s), {args.workers} "
+                    f"job worker(s) each, and {max_concurrent_requests} max request(s).",
+                    file=sys.stderr,
+                )
 
-        with ThreadPoolExecutor(max_workers=max_controller_workers) as pool:
-            future_to_controller = {
-                pool.submit(
-                    process_controller,
-                    controller,
-                    job_names,
-                    path,
-                    tree,
-                    auth,
-                    args.timeout,
-                    not args.no_full_stages,
-                    args.since,
-                    args.workers,
-                    args.retries,
-                    args.retry_backoff,
-                    args.compact,
-                    job_states,
-                    request_semaphore,
-                    incremental,
-                    args.incremental_overlap_millis,
-                ): controller
-                for controller, job_names, path, job_states in controller_specs
-            }
-            for future in as_completed(future_to_controller):
-                controller = future_to_controller[future]
-                try:
-                    result = future.result()
-                except (requests.RequestException, RuntimeError, OSError) as exc:
-                    failures += 1
-                    print(f"[FAIL] {controller.base_url}: {exc}", file=sys.stderr)
-                    continue
+                with ThreadPoolExecutor(max_workers=max_controller_workers) as pool:
+                    future_to_controller = {
+                        pool.submit(
+                            process_controller,
+                            controller,
+                            job_names,
+                            path,
+                            tree,
+                            auth,
+                            args.timeout,
+                            not args.no_full_stages,
+                            args.since,
+                            verify,
+                            args.workers,
+                            args.retries,
+                            args.retry_backoff,
+                            args.compact,
+                            job_states,
+                            request_semaphore,
+                            incremental,
+                            args.incremental_overlap_millis,
+                        ): controller
+                        for controller, job_names, path, job_states in controller_specs
+                    }
+                    for future in as_completed(future_to_controller):
+                        controller = future_to_controller[future]
+                        try:
+                            result = future.result()
+                        except (requests.RequestException, RuntimeError, OSError) as exc:
+                            failures += 1
+                            print(f"[FAIL] {controller.base_url}: {exc}", file=sys.stderr)
+                            continue
 
-                failures += result.failures
-                if incremental:
-                    merge_controller_state_updates(
-                        incremental_state,
-                        result.controller,
-                        result.state_updates,
-                    )
+                        failures += result.failures
+                        if incremental:
+                            merge_controller_state_updates(
+                                incremental_state,
+                                result.controller,
+                                result.state_updates,
+                            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"[FAIL] {exc}", file=sys.stderr)
+            return 1
 
     if incremental:
         try:

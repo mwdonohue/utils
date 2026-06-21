@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/git-enrichment.schema.json",
+  "title": "Git Integration for Jira Enrichment Export",
+  "description": "Output contract for github_enrich_jira_tickets.py. The script writes one JSON document containing metadata about the Jira site, requested Git Integration resources, per-issue raw plugin payloads, and per-resource errors. Raw plugin payloads intentionally accept any JSON value because the Git Integration for Jira app may vary by version and resource.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "jiraBaseUrl",
+    "gitPluginApi",
+    "resources",
+    "issueCount",
+    "elapsedSeconds",
+    "issues"
+  ],
+  "properties": {
+    "jiraBaseUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "gitPluginApi": {
+      "type": "string",
+      "format": "uri"
+    },
+    "resources": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/resourceName"
+      }
+    },
+    "issueCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "elapsedSeconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/enrichedIssue"
+      }
+    }
+  },
+  "$defs": {
+    "resourceName": {
+      "type": "string",
+      "enum": [
+        "commits",
+        "branches",
+        "details",
+        "pullRequest",
+        "tags"
+      ]
+    },
+    "enrichedIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issueId",
+        "gitPlugin"
+      ],
+      "properties": {
+        "issueId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gitPlugin": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "commits": {},
+            "branches": {},
+            "details": {},
+            "pullRequest": {},
+            "tags": {}
+          }
+        },
+        "errors": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "commits": {
+              "$ref": "#/$defs/resourceError"
+            },
+            "branches": {
+              "$ref": "#/$defs/resourceError"
+            },
+            "details": {
+              "$ref": "#/$defs/resourceError"
+            },
+            "pullRequest": {
+              "$ref": "#/$defs/resourceError"
+            },
+            "tags": {
+              "$ref": "#/$defs/resourceError"
+            }
+          }
+        }
+      }
+    },
+    "resourceError": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "url",
+        "message"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "message": {
+          "type": "string"
+        },
+        "statusCode": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "responseText": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -25,6 +25,9 @@ with Basic auth. Credentials are read from CLI args first, then these env vars:
 
     username: JENKINS_USER, JENKINS_USERNAME
     password: JENKINS_API_TOKEN, JENKINS_TOKEN, JENKINS_PASSWORD
+    truststore path: JENKINS_TRUSTSTORE, JENKINS_TRUSTSTORE_PATH
+    truststore password: JENKINS_TRUSTSTORE_PASSWORD, TRUSTSTORE_PASSWORD
+    keytool: KEYTOOL, JAVA_KEYTOOL
 
 Usage
 -----
@@ -40,10 +43,13 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
 try:
@@ -58,8 +64,16 @@ except ModuleNotFoundError:  # pragma: no cover - friendly message, not logic
 JOB_FIELDS = ("name", "fullName", "fullDisplayName", "url", "_class", "allBuilds[number,url,result,timestamp,actions[parameters[name,value]]]")
 USERNAME_ENV_VARS = ("JENKINS_USER", "JENKINS_USERNAME")
 PASSWORD_ENV_VARS = ("JENKINS_API_TOKEN", "JENKINS_TOKEN", "JENKINS_PASSWORD")
+TRUSTSTORE_ENV_VARS = ("JENKINS_TRUSTSTORE", "JENKINS_TRUSTSTORE_PATH")
+TRUSTSTORE_PASSWORD_ENV_VARS = ("JENKINS_TRUSTSTORE_PASSWORD", "TRUSTSTORE_PASSWORD")
+KEYTOOL_ENV_VARS = ("KEYTOOL", "JAVA_KEYTOOL")
 DEFAULT_TIMEOUT = 30
 DEFAULT_OUTPUT_DIR = "."
+DEFAULT_TRUSTSTORE_TYPE = "JKS"
+CERTIFICATE_RE = re.compile(
+    r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+    re.DOTALL,
+)
 
 
 @dataclass(frozen=True)
@@ -91,6 +105,95 @@ def build_jobs_tree(max_depth: int) -> str:
 
 def _first_env(names: tuple[str, ...]) -> str | None:
     return next((os.environ[name] for name in names if os.environ.get(name)), None)
+
+
+def export_truststore_to_pem(
+    truststore_path: str,
+    truststore_password: str,
+    truststore_type: str,
+    keytool: str,
+) -> str:
+    """Export a Java truststore's certificates into a temporary PEM bundle."""
+    if not os.path.isfile(truststore_path):
+        raise ValueError(f"truststore does not exist or is not a file: {truststore_path}")
+    if not truststore_password:
+        raise ValueError(
+            "a truststore password is required. Use --truststore-password or "
+            "set JENKINS_TRUSTSTORE_PASSWORD."
+        )
+
+    cmd = [
+        keytool,
+        "-list",
+        "-rfc",
+        "-keystore",
+        truststore_path,
+        "-storepass",
+        truststore_password,
+        "-storetype",
+        truststore_type,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"cannot find keytool executable {keytool!r}. Install a JDK/JRE or "
+            "pass --keytool PATH."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else "(no stderr)"
+        raise RuntimeError(
+            f"keytool could not read truststore {truststore_path!r}: {stderr}"
+        ) from exc
+
+    certs = CERTIFICATE_RE.findall(result.stdout)
+    if not certs:
+        raise RuntimeError(
+            f"keytool read {truststore_path!r}, but did not output any PEM certificates."
+        )
+
+    fd, pem_path = tempfile.mkstemp(prefix="jenkins-truststore-", suffix=".pem")
+    try:
+        with os.fdopen(fd, "w", encoding="ascii", newline="\n") as fh:
+            fh.write("\n".join(certs))
+            fh.write("\n")
+    except Exception:
+        os.unlink(pem_path)
+        raise
+
+    return pem_path
+
+
+@contextmanager
+def tls_verify_bundle(
+    truststore_path: str | None,
+    truststore_password: str | None,
+    truststore_type: str,
+    keytool: str,
+) -> Iterator[bool | str]:
+    """Yield the requests ``verify`` value, converting JKS/PKCS12 to PEM."""
+    if not truststore_path:
+        yield True
+        return
+
+    pem_path = export_truststore_to_pem(
+        truststore_path=truststore_path,
+        truststore_password=truststore_password or "",
+        truststore_type=truststore_type,
+        keytool=keytool,
+    )
+    try:
+        yield pem_path
+    finally:
+        try:
+            os.unlink(pem_path)
+        except OSError:
+            pass
 
 
 def _safe_filename_stem(parts: Any) -> str:
@@ -200,6 +303,7 @@ def fetch_job_index(
     tree: str,
     auth: HTTPBasicAuth | None,
     timeout: int,
+    verify: bool | str,
 ) -> dict[str, Any]:
     """Fetch one controller's job index with one HTTP request."""
     resp = session.get(
@@ -207,6 +311,7 @@ def fetch_job_index(
         params={"tree": tree},
         auth=auth,
         timeout=timeout,
+        verify=verify,
         allow_redirects=False,
     )
 
@@ -321,6 +426,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "$JENKINS_API_TOKEN, $JENKINS_TOKEN, then $JENKINS_PASSWORD.",
     )
     parser.add_argument(
+        "--truststore",
+        help="JKS/PKCS12 truststore path for Jenkins TLS verification. Falls "
+        "back to $JENKINS_TRUSTSTORE, then $JENKINS_TRUSTSTORE_PATH.",
+    )
+    parser.add_argument(
+        "--truststore-password",
+        help="Truststore password. Falls back to $JENKINS_TRUSTSTORE_PASSWORD, "
+        "then $TRUSTSTORE_PASSWORD.",
+    )
+    parser.add_argument(
+        "--truststore-type",
+        type=str.upper,
+        default=DEFAULT_TRUSTSTORE_TYPE,
+        choices=("JKS", "PKCS12"),
+        help=f"Java truststore type (default: {DEFAULT_TRUSTSTORE_TYPE}).",
+    )
+    parser.add_argument(
+        "--keytool",
+        help="Path to keytool for truststore-to-PEM export. Falls back to "
+        "$KEYTOOL, $JAVA_KEYTOOL, then 'keytool' on PATH.",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=DEFAULT_TIMEOUT,
@@ -361,6 +488,11 @@ def main(argv: list[str] | None = None) -> int:
 
     username = args.username or _first_env(USERNAME_ENV_VARS)
     password = args.password or _first_env(PASSWORD_ENV_VARS)
+    truststore_path = args.truststore or _first_env(TRUSTSTORE_ENV_VARS)
+    truststore_password = (
+        args.truststore_password or _first_env(TRUSTSTORE_PASSWORD_ENV_VARS)
+    )
+    keytool = args.keytool or _first_env(KEYTOOL_ENV_VARS) or "keytool"
     if bool(username) != bool(password):
         raise SystemExit(
             "Basic auth needs both username and password/token. Provide both "
@@ -373,6 +505,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"tree={tree}", file=sys.stderr)
     if auth is None:
         print("No Basic auth credentials provided.", file=sys.stderr)
+    if truststore_path:
+        print(
+            f"Using {args.truststore_type} truststore for TLS verification: "
+            f"{truststore_path}",
+            file=sys.stderr,
+        )
 
     session = requests.Session()
     session.headers.update({"User-Agent": "index-jenkins-jobs-script"})
@@ -388,35 +526,48 @@ def main(argv: list[str] | None = None) -> int:
     output_stems: dict[str, int] = {}
     started = time.perf_counter()
 
-    for controller in normalized:
-        path = output_path_for(controller, args.output_dir, output_stems)
-        try:
-            data = fetch_job_index(
-                session=session,
-                controller=controller,
-                tree=tree,
-                auth=auth,
-                timeout=args.timeout,
-            )
-            output_data: Any = data if args.nested else flatten_jobs(data)
-            write_json(path, output_data, compact=args.compact)
-        except (OSError, requests.RequestException, RuntimeError) as exc:
-            failures += 1
-            print(f"[FAIL] {controller.base_url}: {exc}", file=sys.stderr)
-            continue
+    try:
+        with tls_verify_bundle(
+            truststore_path=truststore_path,
+            truststore_password=truststore_password,
+            truststore_type=args.truststore_type,
+            keytool=keytool,
+        ) as verify:
+            for controller in normalized:
+                path = output_path_for(controller, args.output_dir, output_stems)
+                try:
+                    data = fetch_job_index(
+                        session=session,
+                        controller=controller,
+                        tree=tree,
+                        auth=auth,
+                        timeout=args.timeout,
+                        verify=verify,
+                    )
+                    output_data: Any = data if args.nested else flatten_jobs(data)
+                    write_json(path, output_data, compact=args.compact)
+                except (OSError, requests.RequestException, RuntimeError) as exc:
+                    failures += 1
+                    print(f"[FAIL] {controller.base_url}: {exc}", file=sys.stderr)
+                    continue
 
-        if args.nested:
-            jobs = data.get("jobs")
-            job_count = len(jobs) if isinstance(jobs, list) else 0
-            job_label = "top-level job(s)"
-        else:
-            job_count = len(output_data)
-            job_label = "job(s)"
-        print(
-            f"[ OK ] {controller.base_url}: wrote {path} "
-            f"({job_count} {job_label})",
-            file=sys.stderr,
-        )
+                if args.nested:
+                    jobs = data.get("jobs")
+                    job_count = len(jobs) if isinstance(jobs, list) else 0
+                    job_label = "top-level job(s)"
+                else:
+                    job_count = len(output_data)
+                    job_label = "job(s)"
+                print(
+                    f"[ OK ] {controller.base_url}: wrote {path} "
+                    f"({job_count} {job_label})",
+                    file=sys.stderr,
+                )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return 1
+    finally:
+        session.close()
 
     elapsed = time.perf_counter() - started
     succeeded = len(normalized) - (failures - (len(controllers) - len(normalized)))

@@ -1,0 +1,360 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/jira-ticket.schema.json",
+  "title": "Jira Ticket Export",
+  "description": "Output contract for index_jira_tickets.py. The script writes each issue object from one Jira search response to its own JSON file. Unknown properties are allowed because Jira fields, expansions, and app-provided data are tenant-specific and may change over time.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "id",
+    "key",
+    "self",
+    "fields"
+  ],
+  "properties": {
+    "expand": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "self": {
+      "type": "string",
+      "format": "uri"
+    },
+    "key": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]*-[0-9]+$"
+    },
+    "fields": {
+      "$ref": "#/$defs/fields"
+    },
+    "renderedFields": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "names": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "schema": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "operations": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "editmeta": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "changelog": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "versionedRepresentations": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "transitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "$defs": {
+    "fields": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "description": "Jira description field; may be plain text, Atlassian document format, or null."
+        },
+        "issuetype": {
+          "$ref": "#/$defs/namedEntity"
+        },
+        "project": {
+          "$ref": "#/$defs/project"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/namedEntity"
+            }
+          ]
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/namedEntity"
+            }
+          ]
+        },
+        "assignee": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/user"
+            }
+          ]
+        },
+        "reporter": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/user"
+            }
+          ]
+        },
+        "creator": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/user"
+            }
+          ]
+        },
+        "created": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "updated": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "resolutiondate": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/namedEntity"
+          }
+        },
+        "fixVersions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/version"
+          }
+        },
+        "versions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/version"
+          }
+        },
+        "parent": {
+          "$ref": "#/$defs/issueReference"
+        },
+        "subtasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/issueReference"
+          }
+        }
+      }
+    },
+    "namedEntity": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "self": {
+          "type": "string",
+          "format": "uri"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "self": {
+          "type": "string",
+          "format": "uri"
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "projectTypeKey": {
+          "type": "string"
+        },
+        "simplified": {
+          "type": "boolean"
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "self": {
+          "type": "string",
+          "format": "uri"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "statusCategory": {
+          "$ref": "#/$defs/namedEntity"
+        }
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "self": {
+          "type": "string",
+          "format": "uri"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "released": {
+          "type": "boolean"
+        },
+        "releaseDate": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    },
+    "user": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "self": {
+          "type": "string",
+          "format": "uri"
+        },
+        "accountId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "emailAddress": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "timeZone": {
+          "type": "string"
+        },
+        "accountType": {
+          "type": "string"
+        }
+      }
+    },
+    "issueReference": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "key",
+        "self"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "self": {
+          "type": "string",
+          "format": "uri"
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

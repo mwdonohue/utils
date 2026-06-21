@@ -2,14 +2,80 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.com/schemas/jenkins-jobs.schema.json",
   "title": "Jenkins Jobs Index Export",
-  "description": "Output contract for index_jenkins_jobs.py. By default, each controller output file is a flat array of Jenkins job records. Each record contains only the fields requested from the Jenkins Remote Access API: name, fullName, fullDisplayName, url, and _class. The optional nested Jenkins response shape produced by --nested is defined under $defs/nestedExport.",
+  "description": "Output contract for index_jenkins_jobs.py. By default, each controller output file is a flat array of Jenkins job records. The optional nested Jenkins response shape produced by --nested is defined under $defs/nestedExport. Unknown properties are rejected in the normalized script-owned wrapper shapes; Jenkins action payloads may contain additional plugin-specific fields.",
   "type": "array",
   "items": {
-    "$ref": "#/$defs/job"
+    "$ref": "#/$defs/flatJob"
   },
   "$defs": {
-    "job": {
-      "$ref": "#/$defs/jobFields"
+    "flatJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "fullName",
+        "fullDisplayName",
+        "url",
+        "_class"
+      ],
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Job name relative to its parent folder."
+        },
+        "fullName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Full Jenkins job name, including folder path segments."
+        },
+        "fullDisplayName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Human-readable full Jenkins display name."
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri",
+          "description": "Absolute Jenkins URL for the job."
+        },
+        "_class": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Jenkins model class for the job or folder."
+        },
+        "allBuilds": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/build"
+          },
+          "description": "Build records returned by Jenkins when present in the flattened job object."
+        },
+        "allBuilds[number,url,result,timestamp,actions[parameters[name,value]]]": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/build"
+          },
+          "description": "Current flat-output key produced from the script's JOB_FIELDS tuple for the allBuilds tree expression."
+        }
+      }
     },
     "nestedExport": {
       "type": "object",
@@ -27,9 +93,6 @@
       }
     },
     "nestedJob": {
-      "$ref": "#/$defs/jobFieldsWithChildren"
-    },
-    "jobFields": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -41,59 +104,47 @@
       ],
       "properties": {
         "name": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Job name relative to its parent folder."
         },
         "fullName": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Full Jenkins job name, including folder path segments."
         },
         "fullDisplayName": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Human-readable full Jenkins display name."
         },
         "url": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "uri",
           "description": "Absolute Jenkins URL for the job."
         },
         "_class": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Jenkins model class for the job or folder."
-        }
-      }
-    },
-    "jobFieldsWithChildren": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "name",
-        "fullName",
-        "fullDisplayName",
-        "url",
-        "_class"
-      ],
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "Job name relative to its parent folder."
         },
-        "fullName": {
-          "type": "string",
-          "description": "Full Jenkins job name, including folder path segments."
-        },
-        "fullDisplayName": {
-          "type": "string",
-          "description": "Human-readable full Jenkins display name."
-        },
-        "url": {
-          "type": "string",
-          "format": "uri",
-          "description": "Absolute Jenkins URL for the job."
-        },
-        "_class": {
-          "type": "string",
-          "description": "Jenkins model class for the job or folder."
+        "allBuilds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/build"
+          },
+          "description": "Build records requested by the Jenkins tree expression."
         },
         "jobs": {
           "type": "array",
@@ -101,6 +152,68 @@
             "$ref": "#/$defs/nestedJob"
           },
           "description": "Child jobs returned for folder-like Jenkins items when max depth includes them."
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "number": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri"
+        },
+        "result": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timestamp": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Build start time in epoch milliseconds."
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/buildAction"
+          }
+        }
+      }
+    },
+    "buildAction": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "parameters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/buildParameter"
+          }
+        }
+      }
+    },
+    "buildParameter": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "description": "Jenkins build parameter value. May be any JSON type."
         }
       }
     }
